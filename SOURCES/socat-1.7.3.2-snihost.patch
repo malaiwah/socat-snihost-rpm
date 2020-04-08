@@ -1,0 +1,114 @@
+diff -ruN socat-1.7.3.2.patch1/xio-openssl.c socat-1.7.3.2/xio-openssl.c
+--- socat-1.7.3.2.patch1/xio-openssl.c	2017-01-08 10:39:56.000000000 +0000
++++ socat-1.7.3.2/xio-openssl.c	2020-03-20 21:39:30.899635000 +0000
+@@ -117,6 +117,7 @@
+ const struct optdesc opt_openssl_fips        = { "openssl-fips",       "fips",   OPT_OPENSSL_FIPS,        GROUP_OPENSSL, PH_SPEC, TYPE_BOOL,     OFUNC_SPEC };
+ #endif
+ const struct optdesc opt_openssl_commonname  = { "openssl-commonname", "cn",     OPT_OPENSSL_COMMONNAME,  GROUP_OPENSSL, PH_SPEC, TYPE_STRING,   OFUNC_SPEC };
++const struct optdesc opt_openssl_snihost     = { "openssl-snihost",   "snihost", OPT_OPENSSL_SNIHOST,     GROUP_OPENSSL, PH_SPEC, TYPE_STRING,   OFUNC_SPEC };
+ 
+ 
+ /* If FIPS is compiled in, we need to track if the user asked for FIPS mode.
+@@ -197,6 +198,7 @@
+    bool opt_ver = true;	/* verify peer certificate */
+    char *opt_cert = NULL;	/* file name of client certificate */
+    const char *opt_commonname = NULL;	/* for checking peer certificate */
++   const char *opt_snihost = NULL;   /* for sni host */
+    int result;
+ 
+    if (!(xioflags & XIO_MAYCONVERT)) {
+@@ -226,10 +228,15 @@
+ 
+    retropt_string(opts, OPT_OPENSSL_CERTIFICATE, &opt_cert);
+    retropt_string(opts, OPT_OPENSSL_COMMONNAME, (char **)&opt_commonname);
++   retropt_string(opts, OPT_OPENSSL_SNIHOST, (char **)&opt_snihost);
+    
+    if (opt_commonname == NULL) {
+       opt_commonname = hostname;
+    }
++   /* could do this, but might not be desired?
++   if (opt_snihost == NULL) {
++      opt_snihost = hostname;
++   } */
+ 
+    result =
+       _xioopen_openssl_prepare(opts, xfd, false, &opt_ver, opt_cert, &ctx);
+@@ -289,7 +296,7 @@
+ 	 return result;
+       }
+ 
+-      result = _xioopen_openssl_connect(xfd, opt_ver, opt_commonname, ctx, level);
++      result = _xioopen_openssl_connect(xfd, opt_ver, opt_commonname, opt_snihost, ctx, level);
+       switch (result) {
+       case STAT_OK: break;
+ #if WITH_RETRY
+@@ -358,6 +365,7 @@
+ int _xioopen_openssl_connect(struct single *xfd,
+ 			     bool opt_ver,
+ 			     const char *opt_commonname,
++			     const char *opt_snihost,
+ 			     SSL_CTX *ctx,
+ 			     int level) {
+    SSL *ssl;
+@@ -382,6 +390,12 @@
+       return result;
+    }
+ 
++   if (opt_snihost && !SSL_set_tlsext_host_name(ssl, opt_snihost)) {
++      sycSSL_free(xfd->para.openssl.ssl);
++      xfd->para.openssl.ssl = NULL;
++      return STAT_NORETRY;
++   }
++
+    result = xioSSL_connect(xfd, opt_commonname, opt_ver, level);
+    if (result != STAT_OK) {
+       sycSSL_free(xfd->para.openssl.ssl);
+diff -ruN socat-1.7.3.2.patch1/xio-openssl.h socat-1.7.3.2/xio-openssl.h
+--- socat-1.7.3.2.patch1/xio-openssl.h	2017-01-06 20:58:40.000000000 +0000
++++ socat-1.7.3.2/xio-openssl.h	2020-03-20 21:39:30.899635000 +0000
+@@ -30,6 +30,7 @@
+ extern const struct optdesc opt_openssl_fips;
+ #endif
+ extern const struct optdesc opt_openssl_commonname;
++extern const struct optdesc opt_openssl_snihost;
+ 
+ extern int
+    _xioopen_openssl_prepare(struct opt *opts, struct single *xfd,
+@@ -38,6 +39,7 @@
+ extern int
+    _xioopen_openssl_connect(struct single *xfd,  bool opt_ver,
+ 			    const char *opt_commonname,
++			    const char *opt_snihost,
+ 			    SSL_CTX *ctx, int level);
+ extern int
+    _xioopen_openssl_listen(struct single *xfd, bool opt_ver,
+diff -ruN socat-1.7.3.2.patch1/xioopts.c socat-1.7.3.2/xioopts.c
+--- socat-1.7.3.2.patch1/xioopts.c	2017-01-22 17:48:22.000000000 +0000
++++ socat-1.7.3.2/xioopts.c	2020-03-20 21:39:30.903635000 +0000
+@@ -1111,6 +1111,7 @@
+ 	IF_OPENSSL("openssl-key",	&opt_openssl_key)
+ 	IF_OPENSSL("openssl-method",	&opt_openssl_method)
+ 	IF_OPENSSL("openssl-pseudo",	&opt_openssl_pseudo)
++	IF_OPENSSL("openssl-snihost",   &opt_openssl_snihost)
+ 	IF_OPENSSL("openssl-verify",	&opt_openssl_verify)
+ 	IF_TERMIOS("opost",	&opt_opost)
+ #if defined(HAVE_TERMIOS_ISPEED) && defined(OSPEED_OFFSET) && (OSPEED_OFFSET != -1)
+@@ -1373,6 +1374,7 @@
+ #ifdef SO_SNDLOWAT
+ 	IF_SOCKET ("sndlowat",	&opt_so_sndlowat)
+ #endif
++	IF_OPENSSL("snihost",    &opt_openssl_snihost)
+ #ifdef SO_ACCEPTCONN /* AIX433 */
+ 	IF_SOCKET ("so-acceptconn",	&opt_so_acceptconn)
+ #endif /* SO_ACCEPTCONN */
+diff -ruN socat-1.7.3.2.patch1/xioopts.h socat-1.7.3.2/xioopts.h
+--- socat-1.7.3.2.patch1/xioopts.h	2017-01-06 20:58:40.000000000 +0000
++++ socat-1.7.3.2/xioopts.h	2020-03-20 21:39:30.904635000 +0000
+@@ -483,6 +483,7 @@
+    OPT_OPENSSL_KEY,
+    OPT_OPENSSL_METHOD,
+    OPT_OPENSSL_PSEUDO,
++   OPT_OPENSSL_SNIHOST,
+    OPT_OPENSSL_VERIFY,
+    OPT_OPOST,		/* termios.c_oflag */
+    OPT_OSPEED,		/* termios.c_ospeed */
